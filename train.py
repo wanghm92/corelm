@@ -23,7 +23,7 @@ parser.add_argument("-b", "--batch-size", dest="batchsize", default=128, type=in
 parser.add_argument("-l", "--learning-rate", dest="learning_rate", default=0.01, type=float, help="Learning rate. Default: 0.01")
 parser.add_argument("-D", "--learning-rate-decay", dest="learning_rate_decay", default=0, type=float, help="Learning rate decay (e.g. 0.995) (TO DO). Default: 0")
 parser.add_argument("-M", "--momentum", dest="momentum", default=0, type=float, help="Momentum (TO DO). Default: 0")
-parser.add_argument("-lf","--loss-function", dest="loss_function", default="nll", help="Loss function (nll|nce). Default: nll (Negative Log Likelihood)")
+parser.add_argument("-lf","--loss-function", dest="loss_function", default="nll", help="Loss function (nll|nce|sll). Default: nll (Negative Log Likelihood)")
 parser.add_argument("-ns","--noise-samples", dest="num_noise_samples", default=100 ,type=int, help="Number of noise samples for noise contrastive estimation. Default:100")
 parser.add_argument("-e", "--num-epochs", dest="num_epochs", default=50, type=int, help="Number of iterations (epochs). Default: 50")
 parser.add_argument("-c", "--self-norm-coef", dest="alpha", default=0, type=float, help="Self normalization coefficient (alpha). Default: 0")
@@ -38,6 +38,7 @@ parser.add_argument("--emb-path", dest="emb_path", help="(optional) Word embeddi
 parser.add_argument("--vocab", dest="vocab", help="(optional) Only needed if --emb-path is used.")
 parser.add_argument("--quiet", dest="quiet", action='store_true', help="Use this flag to disable the logger.")
 parser.add_argument( "--adjust-learning-rate", dest="enable_lr_adjust", action='store_true', help="Enable learning rate adjustment")
+parser.add_argument("-bm", "--base-model", dest="base_model_path", help="Base model used for adaptation")
 
 #parser.add_argument("-m","--model-file", dest="model_path",  help="The file path to load the model from")
 
@@ -46,7 +47,7 @@ args = parser.parse_args()
 args.cwd = os.getcwd()
 
 if args.out_dir is None:
-	args.out_dir = 'corelm-' + U.curr_time()
+	args.out_dir = 'primelm-' + U.curr_time()
 U.mkdir_p(args.out_dir)
 
 L.quiet = args.quiet
@@ -73,22 +74,23 @@ from dlm.io.featuresmmapReader import FeaturesMemMapReader
 
 from dlm.models.mlp import MLP
 
+is_sll = args.loss_function == 'sll'
+
 #########################
 ## Loading datasets
 #
 if args.feature_emb_dim is None:
-	trainset = FeaturesMemMapReader(args.trainset, batch_size=args.batchsize, instance_weights_path=args.instance_weights_path)
+	trainset = FeaturesMemMapReader(args.trainset, is_sll, batch_size=args.batchsize, instance_weights_path=args.instance_weights_path)
 	devset = FeaturesMemMapReader(args.devset)
 	testset = None
 	if args.testset:
 		testset = FeaturesMemMapReader(args.testset)
-else:
-	trainset = FeaturesMemMapReader(args.trainset, batch_size=args.batchsize)
+else:														
+	trainset = FeaturesMemMapReader(args.trainset, is_sll, batch_size=args.batchsize)
 	devset = FeaturesMemMapReader(args.devset)
 	testset = None
 	if args.testset:
 		testset = FeaturesMemMapReader(args.testset)
-
 
 #########################
 ## Creating model
@@ -110,12 +112,20 @@ classifier = MLP(args)
 
 L.info('Parameters: ' + str(classifier.params))
 
+if args.base_model_path is not None:
+    initialization_classifier = MLP(model_path=args.base_model_path)        
+    for param, aparam in zip(classifier.params, initialization_classifier.params):
+        param.set_value(aparam.get_value())
+
 #########################
 ## Training criterion
 #
 if args.loss_function == "nll":
 	from dlm.criterions.nll import NegLogLikelihood
 	criterion = NegLogLikelihood(classifier, args)
+elif args.loss_function == "sll":
+	from dlm.criterions.sll import SentenceLevelLogLikelihood
+	criterion = SentenceLevelLogLikelihood(classifier, args)
 elif args.loss_function == "nce":
 	from dlm.criterions.nce import NCELikelihood
 	noise_dist = trainset.get_unigram_model()
