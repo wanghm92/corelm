@@ -14,20 +14,24 @@ parser = argparse.ArgumentParser()
 parser.add_argument("-t", "--test-file", dest="test_path", required=True, help="The evaluation file (memory-mapped, nbest list or text file)")
 parser.add_argument("-f", "--format", dest="format", required=True, help="The evaluation file format (fmmap|mmap|nbest|text)")
 parser.add_argument("-v", "--vocab-file", dest="vocab_path", help="The vocabulary file that was used in training")
-parser.add_argument("-m", "--model-file", dest="model_path", required=True, help="Input CoreLM model file")
+parser.add_argument("-m", "--model-file", dest="model_path", required=True, help="Input PrimeLM model file")
 parser.add_argument("-ulp", "--unnormalized-log-prob-file", dest="ulp_path", help="Output file for sentence-level UNNORMALIZED log-probabilities")
 parser.add_argument("-nlp", "--normalized-log-prob-file", dest="nlp_path", help="Output file for sentence-level NORMALIZED log-probabilities")
 parser.add_argument("-ppl", "--perplexity", action='store_true', help="Compute perplexity")
 parser.add_argument("-op", "--output_path", dest="out_path",  help="Output classes path")
 parser.add_argument("-un", "--unnormalized", action='store_true', help="Output need not be normalized")
 parser.add_argument("-d", "--device", dest="device", default="gpu", help="The computing device (cpu or gpu)")
+parser.add_argument("-lf","--loss-function", dest="loss_function", default="nll", help="Loss function (nll|nce|sll). Default: nll (Negative Log Likelihood)")
 
 args = parser.parse_args()
+
+is_sll = args.loss_function == 'sll'
 
 U.set_theano_device(args.device, 1)
 
 from dlm.models.mlp import MLP
 from dlm import eval
+from dlm import eval_sll
 import theano
 import theano.tensor as T
 
@@ -51,8 +55,7 @@ if args.format == "mmap":
 elif args.format == "fmmap":
 	U.xassert((args.nlp_path is None) and (args.ulp_path is None), "Cannot compute log-probabilities for an features mmap file")
 	from dlm.io.featuresmmapReader import FeaturesMemMapReader
-	testset = FeaturesMemMapReader(dataset_path=args.test_path, batch_size=500)
-
+	testset = FeaturesMemMapReader(dataset_path=args.test_path, is_sll=is_sll, batch_size=500)
 else:
 	U.xassert(args.vocab_path, "Vocab file is required for non-mmap file formats")
 	from dlm.io.textReader import TextReader
@@ -64,9 +67,11 @@ else:
 #########################
 ## Compiling theano function
 #
-
-evaluator = eval.Evaluator(testset, classifier)
-
+if is_sll:
+	evaluator = eval_sll.Evaluator(testset, classifier, is_sll=True)
+else:
+	evaluator = eval.Evaluator(testset, classifier, is_sll=False)
+	
 #########################
 ## Testing
 #
@@ -95,7 +100,6 @@ if args.out_path:
 			batch_labels = evaluator.get_batch_predicted_class(i)
 			for label in batch_labels:
 				output.write(str(label) + '\n')
-
 
 L.info("Ran for %.2fs" % (time.time() - start_time))
 
