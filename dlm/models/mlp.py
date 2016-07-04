@@ -16,12 +16,12 @@ class MLP(classifier.Classifier):
 		######################################################################
 		## Parameters
 		#
-
+		
 		U.xassert((args or model_path) and not (args and model_path), "args or model_path are mutually exclusive")
-
+		
 		if model_path:
 			args, loaded_params = self.load_model(model_path)
-
+		
 		emb_dim = args.emb_dim
 		num_hidden_list = map(int, args.num_hidden.split(','))
 		if num_hidden_list[0] <= 0:
@@ -41,15 +41,15 @@ class MLP(classifier.Classifier):
 				feature_info = feature_info + (feature_dim,)
 				features_info.append(feature_info)
 
-		print "Classifier Creation"
-		print features_info
+		L.info(U.red("Classifier Creation"))
+		L.info("features_info: %s" %U.red(features_info)) 
 		num_classes = args.num_classes
 		activation_name = args.activation_name
 		self.args = args
 		self.L1 = 0
 		self.L2_sqr = 0
 		self.params = []
-
+		
 		# Not implemented with Sequence Labelling
 		emb_path, vocab = None, None
 		try:
@@ -57,9 +57,31 @@ class MLP(classifier.Classifier):
 			vocab = args.vocab
 		except AttributeError:
 			pass
-
+		
 		rng = numpy.random.RandomState(1234)
+
 		self.input = T.imatrix('input')
+		
+		######################################################################
+		## Transition Score Matrix
+		#
+		high = 0.01
+		A_values = numpy.asarray(
+			rng.uniform(
+				low=-high,
+				high=high,
+				size=(num_classes+1, num_classes)
+			),
+			dtype=theano.config.floatX
+		)
+		A = theano.shared(value=A_values, name='A', borrow=True)
+
+		L.info("Transition Score, dimension %s" % U.red(A_values.shape))
+
+		self.A = A
+		if args.loss_function == 'sll':
+			L.info("Transition Score, dimension %s is appended to params" % U.red(A_values.shape))
+			self.params.append(self.A)
 
 		######################################################################
 		## Lookup Table Layer
@@ -85,11 +107,13 @@ class MLP(classifier.Classifier):
 				last_layer_output = lookupTableLayer.output
 			else:
 				last_layer_output = T.concatenate([last_layer_output, lookupTableLayer.output], axis=1)
+			
+			self.looktbout = last_layer_output #DEBUG
 
 			last_layer_output_size +=  (num_elems) * emb_dim
 			self.params += lookupTableLayer.params
 			last_start_pos = last_start_pos + num_elems
-
+		
 		######################################################################
 		## Hidden Layer(s)
 		#
@@ -104,6 +128,9 @@ class MLP(classifier.Classifier):
 			last_layer_output = linearLayer.output
 			last_layer_output_size = num_hidden_list[i]
 			self.params += linearLayer.params
+			
+			self.hidout = last_layer_output #DEBUG
+			self.hidparams = linearLayer.params #DEBUG
 
 			activation = Activation(
 				input=last_layer_output,
@@ -111,9 +138,11 @@ class MLP(classifier.Classifier):
 			)
 			last_layer_output = activation.output
 
+			self.actout = last_layer_output #DEBUG
+
 			self.L1 = self.L1 + abs(linearLayer.W).sum()
 			self.L2_sqr = self.L2_sqr + (linearLayer.W ** 2).sum()
-
+		
 		######################################################################
 		## Output Linear Layer
 		#
@@ -129,16 +158,18 @@ class MLP(classifier.Classifier):
 		last_layer_output = linearLayer.output
 		self.params += linearLayer.params
 
+		self.linearparams = linearLayer.params #DEBUG
+		
 		self.L1 = self.L1 + abs(linearLayer.W).sum()
 		self.L2_sqr = self.L2_sqr + (linearLayer.W ** 2).sum()
-
+		
 		######################################################################
 		## Model Output
 		#
-
+		
 		self.output = last_layer_output
 		self.p_y_given_x_matrix = T.nnet.softmax(last_layer_output)
-
+		
 		# Log Softmax
 		last_layer_output_shifted = last_layer_output - last_layer_output.max(axis=1, keepdims=True)
 		self.log_p_y_given_x_matrix = last_layer_output_shifted - T.log(T.sum(T.exp(last_layer_output_shifted),axis=1,keepdims=True))
@@ -152,33 +183,36 @@ class MLP(classifier.Classifier):
 		## Model Predictions
 
 		self.y_pred = T.argmax(self.p_y_given_x_matrix, axis=1)
-
+		
 		######################################################################
 		## Loading parameters from file (if given)
 		#
-
+		
 		if model_path:
 			self.set_params(loaded_params)
-
+		
 	######################################################################
 	## Model Functions
 	#
-
+	
 	def p_y_given_x(self, y):
 		return self.p_y_given_x_matrix[T.arange(y.shape[0]), y]
 
 	def log_p_y_given_x(self, y):
 		return self.log_p_y_given_x_matrix[T.arange(y.shape[0]), y]
-
+	
 	def unnormalized_p_y_given_x(self, y):
 		return self.output[T.arange(y.shape[0]), y]
-
+	
 	def negative_log_likelihood(self, y, weights=None):
 		if weights:
 			return -T.sum(T.log(self.p_y_given_x(y)) * weights) / T.sum(weights)
 		else:
 			#return -T.mean( T.log(self.p_y_given_x(y)))						# Unstable : can lead to NaN
 			return -T.mean(self.log_p_y_given_x(y))								# Stable Version
+
+	def score_output(self):
+		return self.output
 
 	def errors(self, y):
 		if y.ndim != self.y_pred.ndim:
