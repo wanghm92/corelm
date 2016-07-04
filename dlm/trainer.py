@@ -2,6 +2,7 @@ from __future__ import division
 import theano
 import theano.tensor as T
 from dlm import eval
+from dlm import eval_sll
 import dlm.utils as U
 import dlm.io.logging as L
 from dlm.algorithms.lr_tuner import LRTuner
@@ -9,6 +10,7 @@ import time
 import numpy as np
 import sys
 import time
+import math
 
 
 def train(classifier, criterion, args, trainset, devset, testset=None):
@@ -19,9 +21,11 @@ def train(classifier, criterion, args, trainset, devset, testset=None):
 
 	# Get number of minibatches from the training file
 	num_train_batches = trainset.get_num_batches()
+
+	is_sll = args.loss_function == 'sll'
 	
 	# Initialize the trainer object
-	trainer = Trainer(classifier, criterion, args.learning_rate, trainset, clip_threshold=args.clip_threshold)
+	trainer = Trainer(classifier, criterion, args.learning_rate, trainset, is_sll, clip_threshold=args.clip_threshold)
 
 	# Initialize the Learning Rate tuner, which adjusts learning rate based on the development/validation file
 	lr_tuner = LRTuner(low=0.01*args.learning_rate, high=10*args.learning_rate, inc=0.01*args.learning_rate)
@@ -29,12 +33,12 @@ def train(classifier, criterion, args, trainset, devset, testset=None):
 
 	# Logging and statistics
 	total_num_iter = args.num_epochs * num_train_batches
-	hook = Hook(classifier, devset, testset, total_num_iter, args.out_dir)
+	hook = Hook(classifier, devset, testset, total_num_iter, args.out_dir, is_sll)
 	L.info('Training')
 	start_time = time.time()
 	verbose_freq = 1000 # minibatches
 	epoch = 0
-	
+
 	hook.evaluate(0)
 	
 	a = time.time()
@@ -49,23 +53,26 @@ def train(classifier, criterion, args, trainset, devset, testset=None):
 			# Makes an update of the paramters after processing the minibatch
 			minibatch_avg_cost, gparams = trainer.step(minibatch_index)
 			minibatch_avg_cost_sum += minibatch_avg_cost
-			
+
 			if minibatch_index % verbose_freq == 0:
 				grad_norms = [np.linalg.norm(gparam) for gparam in gparams]
-				L.info(U.blue("[" + time.ctime() + "] ") + '%i/%i, cost=%.2f, lr=%f'
-					% (minibatch_index, num_train_batches, minibatch_avg_cost_sum/(minibatch_index+1), trainer.get_learning_rate()))
+				L.info(U.blue("[" + time.ctime() + "] ") + '%i/%i, current cost=%.2f, total cost=%.2f, average cost=%.2f, lr=%f'
+					% (minibatch_index, num_train_batches, minibatch_avg_cost, minibatch_avg_cost_sum, minibatch_avg_cost_sum/(minibatch_index+1), trainer.get_learning_rate()))
 				L.info('Grad Norms: [' + ', '.join(['%.6f' % gnorm for gnorm in grad_norms]) + ']')
+
 			curr_iter = (epoch - 1) * num_train_batches + minibatch_index
 			if curr_iter > 0 and curr_iter % validation_frequency == 0:
 				hook.evaluate(curr_iter)
 
 		L.info(U.blue("[" + time.ctime() + "] ") + '%i/%i, cost=%.2f, lr=%f'
 			% (num_train_batches, num_train_batches, minibatch_avg_cost_sum/num_train_batches, trainer.get_learning_rate()))
+		
 		dev_ppl = hook.evaluate(curr_iter)
 		lr = trainer.get_learning_rate()
 		if args.enable_lr_adjust:
 			lr = lr_tuner.adapt_lr(dev_ppl, lr)
 		trainer.set_learning_rate(lr)
+
 		classifier.save_model(args.out_dir + '/model.epoch_' + str(epoch) + '.gz', zipped=True)
 
 	end_time = time.time()
@@ -75,12 +82,19 @@ def train(classifier, criterion, args, trainset, devset, testset=None):
 
 
 class Hook:
-	def __init__(self, classifier, devset, testset, total_num_iter, out_dir):
+	def __init__(self, classifier, devset, testset, total_num_iter, out_dir, is_sll=False):
 		self.classifier = classifier
-		self.dev_eval = eval.Evaluator(dataset=devset, classifier=classifier)
 		self.test_eval = None
-		if testset:
-			self.test_eval = eval.Evaluator(dataset=testset, classifier=classifier)
+		
+		if is_sll:
+			self.dev_eval = eval_sll.Evaluator(dataset=devset, classifier=classifier, is_sll=False)
+			if testset:
+				self.test_eval = eval_sll.Evaluator(dataset=testset, classifier=classifier, is_sll=False)
+		else:
+			self.dev_eval = eval.Evaluator(dataset=devset, classifier=classifier, is_sll=False)
+			if testset:
+				self.test_eval = eval.Evaluator(dataset=testset, classifier=classifier, is_sll=False)
+		
 		self.best_iter = 0
 		self.best_dev_perplexity = np.inf
 		self.best_test_perplexity = np.inf
@@ -92,6 +106,7 @@ class Hook:
 		denominator = self.dev_eval.get_denominator()
 		dev_error = self.dev_eval.classification_error()
 		dev_perplexity = self.dev_eval.perplexity()
+
 		if self.test_eval:
 			test_error = self.test_eval.classification_error()
 			test_perplexity = self.test_eval.perplexity()
